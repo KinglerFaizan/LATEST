@@ -189,26 +189,18 @@ def extract_page_image(url):
         for pattern in patterns:
             match = re.search(pattern, html, re.I)
             if match:
-                image = normalize_image_url(match.group(1), response.url)
-                if image:
+                image = match.group(1).strip().replace("&amp;", "&")
+                if image.startswith("//"):
+                    image = "https:" + image
+                elif image.startswith("/"):
+                    parsed = urlparse(response.url)
+                    image = f"{parsed.scheme}://{parsed.netloc}{image}"
+                if image.startswith(("http://", "https://")):
                     return image
     except Exception:
         pass
     return ""
 
-
-def normalize_image_url(image, article_url=""):
-    image = blank(image).replace("&amp;", "&")
-    if not image:
-        return ""
-    if image.startswith("//"):
-        return "https:" + image
-    if image.startswith("/") and article_url:
-        parsed = urlparse(article_url)
-        return f"{parsed.scheme}://{parsed.netloc}{image}"
-    if image.startswith(("http://", "https://")):
-        return image
-    return ""
 
 def enrich_missing_images(rows, max_workers=8):
     """Recover article-specific OG/Twitter images for NewsData rows."""
@@ -266,3 +258,176 @@ def canonical_url(url):
 
 def normalize_title(title):
     text = re.sub(r"[^a-z0-9 ]+", " ", blank(title).lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def tokens(title):
+    return frozenset(
+        x for x in normalize_title(title).split()
+        if x not in STOPWORDS and len(x) > 2
+    )
+
+
+def similarity(a, b):
+    ta, tb = a["_tokens"], b["_tokens"]
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    return max(
+        inter / len(ta | tb),
+        0.92 * inter / min(len(ta), len(tb)),
+        SequenceMatcher(None, a["_norm"], b["_norm"]).ratio(),
+    )
+
+
+def merge(keep, other):
+    keep["providers"] = set(keep.get("providers", set())) | set(
+        other.get("providers", set())
+    )
+    for key in ("image_url", "author", "content"):
+        if not keep.get(key) and other.get(key):
+            keep[key] = other[key]
+    if len(other.get("description", "")) > len(keep.get("description", "")):
+        keep["description"] = other["description"]
+    if not keep.get("published_at") and other.get("published_at"):
+        keep["published_at"] = other["published_at"]
+
+
+def deduplicate(records, threshold=0.80):
+    stats = {"by_url": 0, "by_title": 0, "by_fuzzy": 0}
+    by_url, by_title, survivors = {}, {}, []
+
+    for row in records:
+        title = blank(row.get("title"))
+        if not title or title.lower().startswith("[removed]"):
+            continue
+
+        row["providers"] = set(row.get("providers", set()))
+        cu = canonical_url(row.get("url", ""))
+        nt = normalize_title(title)
+
+        if cu and cu in by_url:
+            merge(by_url[cu], row)
+            stats["by_url"] += 1
+            continue
+        if nt and nt in by_title:
+            merge(by_title[nt], row)
+            stats["by_title"] += 1
+            continue
+
+        row["_norm"] = nt
+        row["_tokens"] = tokens(title)
+        survivors.append(row)
+        if cu:
+            by_url[cu] = row
+        if nt:
+            by_title[nt] = row
+
+    final = []
+    for row in survivors:
+        match = None
+        best = 0.0
+        for existing in final:
+            score = similarity(row, existing)
+            if score >= threshold and score > best:
+                best, match = score, existing
+        if match:
+            merge(match, row)
+            stats["by_fuzzy"] += 1
+        else:
+            final.append(row)
+
+    for row in final:
+        row.pop("_norm", None)
+        row.pop("_tokens", None)
+        row["providers"] = sorted(row.get("providers", set()))
+
+    return final, stats
+
+
+def _fetch_rss_job(category, query, lookback_days):
+    return category, fetch_google_rss(query, lookback_days)
+
+
+def fetch_all(
+    api_keys,
+    lookback_days=2,
+    categories=None,
+    fuzzy_threshold=0.80,
+    max_workers=6,
+):
+    """NewsData.io-only ingestion with category queries and image preservation."""
+    per_provider = {
+        "newsdata": {"requests": 0, "articles": 0, "errors": 0, "quota_hits": 0},
+    }
+    errors = []
+    raw = []
+    key = blank(api_keys.get("newsdata"))
+
+    if not key:
+        return [], ["NewsData.io API key is missing."], {
+            "per_provider": per_provider,
+            "raw": 0, "unique": 0, "retained": 0,
+            "dedup": {"by_url": 0, "by_title": 0, "by_fuzzy": 0},
+            "active": [],
+        }
+
+    jobs = [
+        (category, query)
+        for category, queries in QUERIES.items()
+        if not categories or category in categories
+        for query in queries
+    ]
+
+    def job(category, query):
+        return category, fetch_newsdata(query, key)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(job, category, query) for category, query in jobs]
+        for future in as_completed(futures):
+            category = "Unknown"
+            try:
+                category, rows = future.result()
+                per_provider["newsdata"]["requests"] += 1
+                per_provider["newsdata"]["articles"] += len(rows)
+                for row in rows:
+                    row["provider_category"] = category
+                    row["providers"] = {"newsdata"}
+                    raw.append(row)
+            except QuotaExhausted as exc:
+                per_provider["newsdata"]["requests"] += 1
+                per_provider["newsdata"]["quota_hits"] += 1
+                errors.append(f"NewsData.io quota reached for {category}: {exc}")
+            except Exception as exc:
+                per_provider["newsdata"]["requests"] += 1
+                per_provider["newsdata"]["errors"] += 1
+                errors.append(f"NewsData.io · {category} · {exc}")
+
+    unique, dedup = deduplicate(raw, threshold=fuzzy_threshold)
+    unique = enrich_missing_images(unique)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=int(lookback_days))
+    filtered = []
+    for row in unique:
+        value = row.get("published_at")
+        if not value:
+            filtered.append(row)
+            continue
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt >= cutoff:
+                filtered.append(row)
+        except Exception:
+            filtered.append(row)
+
+    return filtered, errors, {
+        "per_provider": per_provider,
+        "raw": len(raw),
+        "unique": len(unique),
+        "retained": len(filtered),
+        "dedup": dedup,
+        "active": ["newsdata"],
+    }
+
