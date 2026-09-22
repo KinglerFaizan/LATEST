@@ -1,0 +1,19 @@
+# --- SECRETS: never commit real API keys ---
+config.py
+.streamlit/secrets.toml
+*.env
+.env
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# --- OS / editor noise ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
