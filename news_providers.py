@@ -18,31 +18,36 @@ PROVIDERS = {
 
 QUERIES = {
     "Transformation": [
-        "banking digital transformation",
-        "bank artificial intelligence",
-        "bank digital banking",
+        "bank digital transformation",
+        "bank core banking modernization",
+        "bank artificial intelligence machine learning",
+        "bank cloud technology digital banking",
     ],
     "Regulation": [
-        "banking regulation",
-        "banking compliance",
-        "bank regulator",
+        "banking regulation regulator",
+        "banking compliance AML KYC",
+        "bank Basel capital requirements",
+        "bank supervision enforcement penalty",
     ],
     "People": [
         "bank CEO appointment",
-        "bank leadership",
-        "bank executive appointment",
+        "bank CFO executive appointment",
+        "bank board leadership appointment",
+        "bank chief risk officer chief audit executive",
     ],
     "Cyber & Tech": [
-        "bank cybersecurity",
-        "bank cyber attack",
-        "bank technology fraud",
+        "bank cybersecurity cyber attack",
+        "bank ransomware data breach",
+        "bank fraud technology payments security",
+        "bank fintech technology risk",
     ],
     "Global Banks": [
         "HSBC JPMorgan Barclays Deutsche Bank",
         "Bank of America Wells Fargo Citi UBS",
+        "BNP Paribas Santander Standard Chartered Goldman Sachs",
+        "ICBC MUFG Mizuho Morgan Stanley global banks",
     ],
 }
-
 QUOTA_MARKERS = (
     "quota", "rate limit", "ratelimited", "too many requests",
     "exhausted", "limit reached", "limit exceeded", "apikeyexhausted", "429",
