@@ -1,0 +1,35 @@
+name: Apply Streamlit compatibility fix
+
+on:
+  push:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: "!contains(github.event.head_commit.message, 'Fix Streamlit status message compatibility')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fix status message icons
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("app.py")
+          s = p.read_text(encoding="utf-8")
+          s = s.replace('st.success("NewsData.io connected", icon="✓")', 'st.success("NewsData.io connected")')
+          s = s.replace('st.warning("NewsData.io API key is not configured on the server.", icon="⚠️")', 'st.warning("NewsData.io API key is not configured on the server.")')
+          s = s.replace('articles, errors, stats = load_news(\n            {"newsdata": api_keys["newsdata"]},', 'articles, errors, stats = load_news(\n            api_keys["newsdata"],')
+          p.write_text(s, encoding="utf-8")
+          PY
+
+      - name: Commit fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git diff --cached --quiet || git commit -m "Fix Streamlit status message compatibility"
+          git push
