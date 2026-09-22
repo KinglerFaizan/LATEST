@@ -851,7 +851,7 @@ st.markdown("""
 # 2. CATEGORIES, SCORING VOCABULARY & BRANDING
 # ---------------------------------------------------------
 
-CATEGORIES = {k: {} for k in npv.CATEGORY_NAMES}
+CATEGORIES = {k: {} for k in ("Transformation", "Regulation", "People", "Cyber & Tech", "Global Banks")}
 
 CATEGORY_DISPLAY = {
     "Transformation": "Transformation",
