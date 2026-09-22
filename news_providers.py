@@ -356,52 +356,93 @@ def fetch_all(
     fuzzy_threshold=0.80,
     max_workers=6,
 ):
-    """NewsData.io-only ingestion with category queries and image preservation."""
+    """Build a broader banking-news pool from NewsData.io plus Google News RSS.
+
+    NewsData supplies API-backed stories and article images. Google News RSS is
+    used as a no-key supplemental source so the newsroom is not limited to the
+    first 10 NewsData results per query on free plans.
+    """
     per_provider = {
         "newsdata": {"requests": 0, "articles": 0, "errors": 0, "quota_hits": 0},
+        "google_rss": {"requests": 0, "articles": 0, "errors": 0, "quota_hits": 0},
     }
     errors = []
     raw = []
     key = blank(api_keys.get("newsdata"))
 
-    if not key:
-        return [], ["NewsData.io API key is missing."], {
-            "per_provider": per_provider,
-            "raw": 0, "unique": 0, "retained": 0,
-            "dedup": {"by_url": 0, "by_title": 0, "by_fuzzy": 0},
-            "active": [],
-        }
+    selected = set(categories or QUERIES.keys())
 
-    jobs = [
-        (category, query)
-        for category, queries in QUERIES.items()
-        if not categories or category in categories
-        for query in queries
+    # ---- NewsData.io: API-backed primary feed ----
+    if key:
+        jobs = [
+            (category, query)
+            for category, queries in QUERIES.items()
+            if category in selected
+            for query in queries
+        ]
+
+        def newsdata_job(category, query):
+            return category, fetch_newsdata(query, key)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(newsdata_job, category, query) for category, query in jobs]
+            for future in as_completed(futures):
+                category = "Unknown"
+                try:
+                    category, rows = future.result()
+                    per_provider["newsdata"]["requests"] += 1
+                    per_provider["newsdata"]["articles"] += len(rows)
+                    for row in rows:
+                        row["provider_category"] = category
+                        row["providers"] = {"newsdata"}
+                        raw.append(row)
+                except QuotaExhausted as exc:
+                    per_provider["newsdata"]["requests"] += 1
+                    per_provider["newsdata"]["quota_hits"] += 1
+                    errors.append(f"NewsData.io quota reached for {category}: {exc}")
+                except Exception as exc:
+                    per_provider["newsdata"]["requests"] += 1
+                    per_provider["newsdata"]["errors"] += 1
+                    errors.append(f"NewsData.io · {category} · {exc}")
+    else:
+        errors.append("NewsData.io API key is missing.")
+
+    # ---- Google News RSS: no-key supplemental feed ----
+    # One broader query per category gives substantially more coverage without
+    # spending additional NewsData API credits.
+    rss_queries = {
+        "Transformation": '"banking" (digital OR AI OR technology OR transformation OR fintech)',
+        "Regulation": '"bank" (regulation OR regulator OR compliance OR supervision OR capital OR AML)',
+        "People": '"bank" (CEO OR CFO OR executive OR leadership OR appointment)',
+        "Cyber & Tech": '"bank" (cybersecurity OR cyberattack OR ransomware OR fraud OR technology)',
+        "Global Banks": '(HSBC OR JPMorgan OR Barclays OR "Bank of America" OR Citi OR UBS OR "Deutsche Bank" OR Wells Fargo)',
+    }
+
+    rss_jobs = [
+        (category, rss_queries[category])
+        for category in selected
+        if category in rss_queries
     ]
 
-    def job(category, query):
-        return category, fetch_newsdata(query, key)
+    def rss_job(category, query):
+        return category, fetch_google_rss(query, lookback_days)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(job, category, query) for category, query in jobs]
+    with ThreadPoolExecutor(max_workers=min(max_workers, 5)) as pool:
+        futures = [pool.submit(rss_job, category, query) for category, query in rss_jobs]
         for future in as_completed(futures):
             category = "Unknown"
             try:
                 category, rows = future.result()
-                per_provider["newsdata"]["requests"] += 1
-                per_provider["newsdata"]["articles"] += len(rows)
+                per_provider["google_rss"]["requests"] += 1
+                per_provider["google_rss"]["articles"] += len(rows)
                 for row in rows:
                     row["provider_category"] = category
-                    row["providers"] = {"newsdata"}
+                    row["providers"] = {"google_rss"}
                     raw.append(row)
-            except QuotaExhausted as exc:
-                per_provider["newsdata"]["requests"] += 1
-                per_provider["newsdata"]["quota_hits"] += 1
-                errors.append(f"NewsData.io quota reached for {category}: {exc}")
             except Exception as exc:
-                per_provider["newsdata"]["requests"] += 1
-                per_provider["newsdata"]["errors"] += 1
-                errors.append(f"NewsData.io · {category} · {exc}")
+                per_provider["google_rss"]["requests"] += 1
+                per_provider["google_rss"]["errors"] += 1
+                errors.append(f"Google News RSS · {category} · {exc}")
 
     unique, dedup = deduplicate(raw, threshold=fuzzy_threshold)
     unique = enrich_missing_images(unique)
@@ -428,6 +469,5 @@ def fetch_all(
         "unique": len(unique),
         "retained": len(filtered),
         "dedup": dedup,
-        "active": ["newsdata"],
+        "active": ["newsdata", "google_rss"],
     }
-
